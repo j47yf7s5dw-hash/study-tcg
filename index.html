@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <meta name="theme-color" content="#0b0d10">
-<title>Study TCG v1</title>
+<title>Study TCG v1.1</title>
 <style>
 :root{
   --bg:#0b0d10;--panel:#15181d;--panel2:#1b1f25;--text:#f3eee5;--muted:#aaa49a;
@@ -96,7 +96,7 @@ select{flex:1}
 </head>
 <body>
 <div class="app">
-  <header class="topbar"><div class="brand"><h1>Study TCG</h1><div class="version">INTEGRATED v1</div></div></header>
+  <header class="topbar"><div class="brand"><h1>Study TCG</h1><div class="version">INTEGRATED v1.1</div></div></header>
 
   <section class="view active" id="view-study">
     <h2 class="section-title">勉強する</h2>
@@ -105,7 +105,9 @@ select{flex:1}
       <div class="subject-row"><label>科目</label><select id="studySubject">
         <option value="JP-HISTORY">日本史</option><option value="ENGLISH">英語</option><option value="MODERN-JP">現代文</option><option value="CLASSICAL-JP">古文</option>
       </select></div>
-      <div class="timer" id="timer">00:00:00</div><div class="state" id="timerState">停止中</div>
+      <div class="timer" id="timer">00:00:00</div>
+      <div class="state" id="timerState">停止中</div>
+      <div class="state" id="carryState">現在の繰越 00:00 → 次のPACKまで 30:00</div>
       <div class="progress-wrap"><div class="progress-head"><span>次のパックまで</span><span id="progressText">0 / 30分</span></div><div class="bar"><div id="studyBar"></div></div><div class="reward" id="studyReward"></div></div>
       <div class="controls"><button class="btn primary" id="startTimer">START</button><button class="btn danger" id="stopTimer" disabled>STOP</button></div>
     </div>
@@ -203,29 +205,188 @@ document.querySelectorAll(".navbtn").forEach(b=>b.onclick=()=>{
 });
 
 /* timer */
-function addRecord(date,id,sec){if(sec<=0)return;save.studyRecords[date]=save.studyRecords[date]||{};save.studyRecords[date][id]=Number(save.studyRecords[date][id]||0)+sec}
-function splitRecord(start,end,id){let cur=start;while(cur<end){let edge=Math.min(nextMidnight(cur),end);addRecord(localDateKey(cur),id,(edge-cur)/1000);cur=edge}}
-function commitStudy(id,start,end){if(end<=start)return {seconds:0,packs:0};let sec=Math.floor((end-start)/1000);splitRecord(start,end,id);let total=Number(save.studyCarrySeconds[id]||0)+sec,earn=Math.floor(total/THRESHOLD);save.studyCarrySeconds[id]=total%THRESHOLD;if(earn)setPack(id,getPack(id)+earn);persist();return {seconds:sec,packs:earn}}
-function runningElapsed(){return save.timerState?.running?Math.max(0,Math.floor((Date.now()-save.timerState.startedAt)/1000)):0}
-function selectedStudy(){return save.timerState?.running?save.timerState.subjectId:document.getElementById("studySubject").value}
-function projectedCarry(id){let c=Number(save.studyCarrySeconds[id]||0);if(save.timerState?.running&&save.timerState.subjectId===id)c+=runningElapsed();return c}
-function formatBreak(obj){let p=SUBJECT_IDS.map(id=>[id,Math.floor(Number(obj?.[id]||0)/60)]).filter(x=>x[1]>0).map(([id,m])=>`${SUBJECTS[id]} ${m}分`);return p.length?p.join(" / "):"記録なし"}
-function renderStudy(){
-  const running=!!save.timerState?.running,s=document.getElementById("studySubject");s.disabled=running;document.getElementById("startTimer").disabled=running;document.getElementById("stopTimer").disabled=!running;
-  let elapsed=running?runningElapsed():0;document.getElementById("timer").textContent=fmt(elapsed);document.getElementById("timerState").textContent=running?`${SUBJECTS[save.timerState.subjectId]}を計測中`:"停止中";
-  let id=selectedStudy(),proj=projectedCarry(id),progress=proj%THRESHOLD,earn=Math.floor(proj/THRESHOLD);
-  document.getElementById("progressText").textContent=`${Math.floor(progress/60)}分 / 30分${earn?`（今回 +${earn}PACK予定）`:""}`;document.getElementById("studyBar").style.width=`${progress/THRESHOLD*100}%`;
-  document.getElementById("studyReward").textContent=`${SUBJECTS[id]}：${getPack(id)} PACK${earn?` → STOP時 ${getPack(id)+earn}`:""}`;
-  const now=new Date(),today=localDateKey(Date.now()),to=save.studyRecords[today]||{};document.getElementById("todayTotal").textContent=`${Math.floor(dayTotal(to)/60)}分`;document.getElementById("todayBreak").textContent=formatBreak(to);
-  const ym=`${now.getFullYear()}-${pad(now.getMonth()+1)}`,mo={};for(const [d,o] of Object.entries(save.studyRecords))if(d.startsWith(ym+"-"))for(const [sid,sec] of Object.entries(o))mo[sid]=Number(mo[sid]||0)+Number(sec||0);
-  document.getElementById("monthStudyTotal").textContent=`${Math.floor(dayTotal(mo)/60)}分`;document.getElementById("monthBreak").textContent=formatBreak(mo);
-  document.getElementById("subjectStats").innerHTML=SUBJECT_IDS.map(sid=>`<div class="subject-card"><b>${SUBJECTS[sid]}</b><span>繰越 ${Math.floor(Number(save.studyCarrySeconds[sid]||0)/60)}分</span><span>${getPack(sid)} PACK</span></div>`).join("");
+function getCarry(id){
+  return Math.max(0,Number(save.studyCarrySeconds[id]||0));
 }
-document.getElementById("startTimer").onclick=()=>{let id=document.getElementById("studySubject").value;save.timerState={running:true,subjectId:id,startedAt:Date.now()};persist();renderStudy()};
-document.getElementById("stopTimer").onclick=()=>{if(!save.timerState?.running)return;let t=save.timerState;save.timerState=null;let r=commitStudy(t.subjectId,t.startedAt,Date.now());renderAll();document.getElementById("timerState").textContent=`${SUBJECTS[t.subjectId]} ${Math.floor(r.seconds/60)}分${r.packs?`・${r.packs}PACK獲得`:""}`};
+function addRecord(date,id,sec){
+  if(sec<=0)return;
+  save.studyRecords[date]=save.studyRecords[date]||{};
+  save.studyRecords[date][id]=Number(save.studyRecords[date][id]||0)+sec;
+}
+function splitRecord(start,end,id){
+  let cur=start;
+  while(cur<end){
+    const edge=Math.min(nextMidnight(cur),end);
+    addRecord(localDateKey(cur),id,(edge-cur)/1000);
+    cur=edge;
+  }
+}
+function applyStudySeconds(id,seconds){
+  seconds=Math.max(0,Math.floor(seconds));
+  const total=getCarry(id)+seconds;
+  const earn=Math.floor(total/THRESHOLD);
+  save.studyCarrySeconds[id]=total%THRESHOLD;
+  if(earn>0)setPack(id,getPack(id)+earn);
+  return {seconds,packs:earn,carry:save.studyCarrySeconds[id]};
+}
+function commitStudy(id,start,end){
+  if(end<=start)return {seconds:0,packs:0,carry:getCarry(id)};
+  const sec=Math.max(0,Math.floor((end-start)/1000));
+  splitRecord(start,end,id);
+  const result=applyStudySeconds(id,sec);
+  persist();
+  return result;
+}
+function commitTimerSession(timer,end){
+  if(!timer?.running)return {seconds:0,packs:0,carry:0};
+
+  const sec=Math.max(0,Math.floor((end-timer.startedAt)/1000));
+  splitRecord(timer.startedAt,end,timer.subjectId);
+
+  // STARTした瞬間の繰越値を固定して使う。
+  // STOP→再開やページ再読み込みを挟んでも余り時間を失わない。
+  const baseCarry=Math.max(0,Number(
+    timer.carryAtStart ?? save.studyCarrySeconds[timer.subjectId] ?? 0
+  ));
+  const total=baseCarry+sec;
+  const earn=Math.floor(total/THRESHOLD);
+
+  save.studyCarrySeconds[timer.subjectId]=total%THRESHOLD;
+  if(earn>0)setPack(timer.subjectId,getPack(timer.subjectId)+earn);
+
+  persist();
+  return {
+    seconds:sec,
+    packs:earn,
+    carry:save.studyCarrySeconds[timer.subjectId]
+  };
+}
+function runningElapsed(){
+  return save.timerState?.running
+    ? Math.max(0,Math.floor((Date.now()-save.timerState.startedAt)/1000))
+    : 0;
+}
+function selectedStudy(){
+  return save.timerState?.running
+    ? save.timerState.subjectId
+    : document.getElementById("studySubject").value;
+}
+function projectedTotal(id){
+  if(save.timerState?.running && save.timerState.subjectId===id){
+    const base=Math.max(0,Number(
+      save.timerState.carryAtStart ?? save.studyCarrySeconds[id] ?? 0
+    ));
+    return base+runningElapsed();
+  }
+  return getCarry(id);
+}
+function formatBreak(obj){
+  const p=SUBJECT_IDS
+    .map(id=>[id,Math.floor(Number(obj?.[id]||0)/60)])
+    .filter(x=>x[1]>0)
+    .map(([id,m])=>`${SUBJECTS[id]} ${m}分`);
+  return p.length?p.join(" / "):"記録なし";
+}
+function formatMS(sec){
+  sec=Math.max(0,Math.floor(sec));
+  return `${pad(Math.floor(sec/60))}:${pad(sec%60)}`;
+}
+function renderStudy(){
+  const running=!!save.timerState?.running;
+  const s=document.getElementById("studySubject");
+
+  s.disabled=running;
+  document.getElementById("startTimer").disabled=running;
+  document.getElementById("stopTimer").disabled=!running;
+
+  const elapsed=running?runningElapsed():0;
+  document.getElementById("timer").textContent=fmt(elapsed);
+  document.getElementById("timerState").textContent=running
+    ? `${SUBJECTS[save.timerState.subjectId]}を計測中`
+    : "停止中";
+
+  const id=selectedStudy();
+  const savedCarry=getCarry(id);
+  const total=projectedTotal(id);
+  const progress=total%THRESHOLD;
+  const earn=Math.floor(total/THRESHOLD);
+  const carryBase=running
+    ? Math.max(0,Number(save.timerState.carryAtStart ?? savedCarry))
+    : savedCarry;
+  const remain=progress===0 ? THRESHOLD : THRESHOLD-progress;
+
+  document.getElementById("carryState").textContent=running
+    ? `前回繰越 ${formatMS(carryBase)} ＋ 今回 ${formatMS(elapsed)}`
+    : `現在の繰越 ${formatMS(savedCarry)} → 次のPACKまで ${formatMS(remain)}`;
+
+  document.getElementById("progressText").textContent=
+    `${Math.floor(progress/60)}分 / 30分${earn?`（今回 +${earn}PACK予定）`:""}`;
+  document.getElementById("studyBar").style.width=`${progress/THRESHOLD*100}%`;
+  document.getElementById("studyReward").textContent=
+    `${SUBJECTS[id]}：${getPack(id)} PACK${earn?` → STOP時 ${getPack(id)+earn}`:""}`;
+
+  const now=new Date();
+  const today=localDateKey(Date.now());
+  const to=save.studyRecords[today]||{};
+  document.getElementById("todayTotal").textContent=`${Math.floor(dayTotal(to)/60)}分`;
+  document.getElementById("todayBreak").textContent=formatBreak(to);
+
+  const ym=`${now.getFullYear()}-${pad(now.getMonth()+1)}`;
+  const mo={};
+  for(const [d,o] of Object.entries(save.studyRecords)){
+    if(d.startsWith(ym+"-")){
+      for(const [sid,sec] of Object.entries(o)){
+        mo[sid]=Number(mo[sid]||0)+Number(sec||0);
+      }
+    }
+  }
+  document.getElementById("monthStudyTotal").textContent=`${Math.floor(dayTotal(mo)/60)}分`;
+  document.getElementById("monthBreak").textContent=formatBreak(mo);
+
+  document.getElementById("subjectStats").innerHTML=SUBJECT_IDS.map(sid=>
+    `<div class="subject-card">
+      <b>${SUBJECTS[sid]}</b>
+      <span>繰越 ${formatMS(getCarry(sid))}</span>
+      <span>${getPack(sid)} PACK</span>
+    </div>`
+  ).join("");
+}
+document.getElementById("startTimer").onclick=()=>{
+  const id=document.getElementById("studySubject").value;
+  save.timerState={
+    running:true,
+    subjectId:id,
+    startedAt:Date.now(),
+    carryAtStart:getCarry(id)
+  };
+  persist();
+  renderStudy();
+};
+document.getElementById("stopTimer").onclick=()=>{
+  if(!save.timerState?.running)return;
+
+  const t={...save.timerState};
+  const end=Date.now();
+  save.timerState=null;
+
+  const r=commitTimerSession(t,end);
+  renderAll();
+
+  document.getElementById("timerState").textContent=
+    `${SUBJECTS[t.subjectId]} ${Math.floor(r.seconds/60)}分`
+    +(r.packs?`・${r.packs}PACK獲得`:"")
+    +`・繰越 ${formatMS(r.carry)}`;
+};
 document.getElementById("studySubject").onchange=renderStudy;
-function devAdd(sec){let id=document.getElementById("studySubject").value,end=Date.now();commitStudy(id,end-sec*1000,end);renderAll()}
-document.getElementById("dev15").onclick=()=>devAdd(900);document.getElementById("dev30").onclick=()=>devAdd(1800);
+
+function devAdd(sec){
+  const id=document.getElementById("studySubject").value;
+  const end=Date.now();
+  commitStudy(id,end-sec*1000,end);
+  renderAll();
+}
+document.getElementById("dev15").onclick=()=>devAdd(900);
+document.getElementById("dev30").onclick=()=>devAdd(1800);
 
 /* opening */
 let packSubject="JP-HISTORY",boxSubject="JP-HISTORY";
@@ -284,7 +445,13 @@ document.getElementById("prevMonth").onclick=()=>{viewMonth--;if(viewMonth<0){vi
 
 /* render */
 function renderAll(){renderStudy();renderOpening();renderCatalog();renderCalendar()}
-if(save.timerState?.running)document.getElementById("studySubject").value=save.timerState.subjectId;
+if(save.timerState?.running){
+  if(save.timerState.carryAtStart==null){
+    save.timerState.carryAtStart=getCarry(save.timerState.subjectId);
+    persist();
+  }
+  document.getElementById("studySubject").value=save.timerState.subjectId;
+}
 renderAll();setInterval(()=>{if(save.timerState?.running)renderStudy()},1000);
 if(save.pendingOpen)setTimeout(()=>showPending(false),200);
 </script>
